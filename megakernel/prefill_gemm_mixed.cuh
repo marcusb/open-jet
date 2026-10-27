@@ -9,7 +9,7 @@
 // Tile: 128 weight rows x 128 tokens per CTA, 8 warps of 16 rows x 128 tokens.  K is staged 64 at a
 // time (one 64-group of a super-block: two 32-element sub-blocks) through a cp.async pipeline with
 // one block barrier per stage; per-row sub-block scales are decoded one stage ahead.  Products
-// accumulate in fp16 over two stages (k = 128) and are then added to fp32 accumulators.
+// accumulate directly in fp32 via mma_f32 (for hardware/unlocked full-rate fp32 accumulation).
 #pragma once
 
 #include <cuda_fp16.h>
@@ -93,22 +93,16 @@ template <> struct HT<TIQ4> { static constexpr int SR = 48, NS = 4; static const
 template <> struct HT<TQ5K> { static constexpr int SR = 80, NS = 3; static constexpr bool SEP = true; };
 template <> struct HT<TQ6K> { static constexpr int SR = 64, NS = 4; static constexpr bool SEP = false; };
 template <> struct HT<TQ80> { static constexpr int SR = 80, NS = 3; static constexpr bool SEP = true; };
-constexpr int HCH = 2; // stages accumulated in fp16 before adding to the fp32 accumulators
 constexpr int HMI = 1, HWR = 16 * HMI, HNWM = BM / HWR, HWT = BN / (8 / HNWM), HNI = HWT / 8; // warp tiles
 constexpr int HM_X = BN * 128; // activation tile per stage: 128 tokens x 64 halves, 16 B chunks XOR-swizzled
 template <int TYPE> __host__ __device__ constexpr int hm_stage() { return HT<TYPE>::SR * BM + HM_X; }
 template <int TYPE> __host__ __device__ constexpr int hm_smem() { return HT<TYPE>::NS * hm_stage<TYPE>() + (HT<TYPE>::SEP ? 2 * 2 * BM * 8 : 0); }
 static_assert(BN * (BM + 4) * 4 <= hm_smem<TQ5K>() && BN * (BM + 4) * 4 <= hm_smem<TQ4K>(), "epilogue tile");
 
-__device__ __forceinline__ void hmma16(unsigned (&d)[2], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};"
-                 : "+r"(d[0]), "+r"(d[1])
+__device__ __forceinline__ void hmma32(float (&c)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ void hmma16z(unsigned (&d)[2], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%8,%8};"
-                 : "=r"(d[0]), "=r"(d[1])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(0));
 }
 __device__ __forceinline__ __half2 u2h(unsigned u) { return *reinterpret_cast<__half2 *>(&u); }
 __device__ __forceinline__ unsigned h2u(__half2 h) { return *reinterpret_cast<unsigned *>(&h); }
@@ -318,9 +312,7 @@ __global__ void __launch_bounds__(256, 1) mmh(WMat W, const __half * X, int ntok
                             h2u(__hadd2(u2h(__byte_perm(wd[j][kk][r], 0x64646464u, hh ? 0x4342 : 0x4140)), off2));
         }
     };
-    unsigned ch[HMI][HNI][2];
-    auto step = [&](int st, auto ph) {
-        constexpr int PH = decltype(ph)::value;
+    auto step = [&](int st) {
         cpa_wait<NSH - 3>();
         __syncthreads();
 
@@ -374,13 +366,8 @@ __global__ void __launch_bounds__(256, 1) mmh(WMat W, const __half * X, int ntok
                 ldsm_x4(r, sx + xo[G] + np * 16 * 128);
 #pragma unroll
                 for (int mi = 0; mi < HMI; mi++) {
-                    if (G == 0 && (PH == 0 || HCH == 1)) {
-                        hmma16z(ch[mi][2 * np], a[mi][j][kk], r[0], r[1]);
-                        hmma16z(ch[mi][2 * np + 1], a[mi][j][kk], r[2], r[3]);
-                    } else {
-                        hmma16(ch[mi][2 * np], a[mi][j][kk], r[0], r[1]);
-                        hmma16(ch[mi][2 * np + 1], a[mi][j][kk], r[2], r[3]);
-                    }
+                    hmma32(acc[mi][2 * np], a[mi][j][kk], r[0], r[1]);
+                    hmma32(acc[mi][2 * np + 1], a[mi][j][kk], r[2], r[3]);
                 }
             }
             // next stages' copies and scales are issued once the tensor pipe has work queued
@@ -390,18 +377,10 @@ __global__ void __launch_bounds__(256, 1) mmh(WMat W, const __half * X, int ntok
             }
             if (G == 1 && st + 1 < nst) scales(st + 1);
         }
-        if (PH == HCH - 1 || HCH == 1)
-#pragma unroll
-        for (int mi = 0; mi < HMI; mi++)
-#pragma unroll
-        for (int ni = 0; ni < HNI; ni++) {
-            const float2 lo = __half22float2(u2h(ch[mi][ni][0])), hi = __half22float2(u2h(ch[mi][ni][1]));
-            acc[mi][ni][0] += lo.x; acc[mi][ni][1] += lo.y; acc[mi][ni][2] += hi.x; acc[mi][ni][3] += hi.y;
-        }
     };
     for (int st = 0; st < nst; st += 2) { // nst is even for every K of the model
-        step(st, std::integral_constant<int, 0>());
-        step(st + 1, std::integral_constant<int, 1>());
+        step(st);
+        step(st + 1);
     }
     cpa_wait<0>();
     __syncthreads();

@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "measurement": "Warmed, fresh-context prompt processing through the first generated token (prefill_bench.py)",
+  "hardware": {
+    "device": 0,
+    "model": "NVIDIA GeForce RTX 3090",
+    "compute_capability": "8.6",
+    "vram_mib": 24576,
+    "gpu_unlock": "Applied (https://github.com/Zagitta/gpu-unlock, full-speed FP32 accumulation unlocked)"
+  },
+  "model": {
+    "repository": "unsloth/Qwen3.8-27B-GGUF",
+    "filename": "Qwen3.8-27B-Q4_K_M.gguf",
+    "bytes": 17106775008,
+    "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+  },
+  "workload": {
+    "description": "Original CC0 synthetic garden ledger and Python arithmetic code, generated from 1024 numbered records",
+    "preparation": "prefill_bench.py --backend prepare",
+    "inputs": [
+      {"tokens": 2048, "token_sha256": "906112992272bf1fc5f02477bedd9e32365f740121231bdc9722d1db89d6e79b"},
+      {"tokens": 4096, "token_sha256": "a00eae8f881e00f6eb3d6b3f40fd01919286c3934c361a180c76b1ad17024b56"},
+      {"tokens": 8192, "token_sha256": "6543ac6dca4139ea1b881cba289a889302568d533ee1b8fb7e486217f965569f"}
+    ]
+  },
+  "settings": {
+    "context_capacity": 16384,
+    "kv": "q8",
+    "draft": 4,
+    "draft_vocab": 32768,
+    "timed_repetitions_per_length": 3,
+    "excluded_same_process_warmups_per_length": 1,
+    "sampling": "greedy",
+    "mode": "existing synchronous Engine C API (Engine.prefill)",
+    "aggregation": "total processed prompt tokens / total measured prompt-processing seconds"
+  },
+  "sample_columns": ["input_tokens", "repetition", "measured_seconds", "tokens_per_second"],
+  "samples": {
+    "master_fp16_accum": [
+      [2048, 1, 1.160008, 1765.50],
+      [2048, 2, 1.161717, 1762.91],
+      [2048, 3, 1.161978, 1762.51],
+      [4096, 1, 2.339233, 1751.00],
+      [4096, 2, 2.325667, 1761.22],
+      [4096, 3, 2.319941, 1765.56],
+      [8192, 1, 4.787378, 1711.17],
+      [8192, 2, 4.808398, 1703.69],
+      [8192, 3, 4.815847, 1701.05]
+    ],
+    "branch_direct_fp32_accum": [
+      [2048, 1, 1.133261, 1807.17],
+      [2048, 2, 1.133740, 1806.41],
+      [2048, 3, 1.134402, 1805.36],
+      [4096, 1, 2.282479, 1794.54],
+      [4096, 2, 2.286053, 1791.73],
+      [4096, 3, 2.265926, 1807.65],
+      [8192, 1, 4.667709, 1755.04],
+      [8192, 2, 4.688539, 1747.24],
+      [8192, 3, 4.699984, 1742.98]
+    ]
+  },
+  "summary": [
+    {
+      "input_tokens": 2048,
+      "master_mean_seconds": 1.161235,
+      "master_tokens_per_second": 1763.64,
+      "branch_mean_seconds": 1.133801,
+      "branch_tokens_per_second": 1806.31,
+      "speedup_ratio": 1.0242,
+      "speedup_pct": "+2.42%"
+    },
+    {
+      "input_tokens": 4096,
+      "master_mean_seconds": 2.328280,
+      "master_tokens_per_second": 1759.24,
+      "branch_mean_seconds": 2.278153,
+      "branch_tokens_per_second": 1797.95,
+      "speedup_ratio": 1.0220,
+      "speedup_pct": "+2.20%"
+    },
+    {
+      "input_tokens": 8192,
+      "master_mean_seconds": 4.803874,
+      "master_tokens_per_second": 1705.29,
+      "branch_mean_seconds": 4.685410,
+      "branch_tokens_per_second": 1748.41,
+      "speedup_ratio": 1.0253,
+      "speedup_pct": "+2.53%"
+    }
+  ]
+}
